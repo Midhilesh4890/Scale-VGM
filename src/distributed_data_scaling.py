@@ -60,6 +60,8 @@ class DataScalerDask:
         """
         start_time = time.time()
         logging.info(f"Loading dataset from {self.input_path}...")
+
+        # Load the dataset using Dask
         data: dd.DataFrame = dd.read_csv(self.input_path, assume_missing=True)
 
         # Drop 'Unnamed: 0' or any implicit index column
@@ -96,17 +98,19 @@ class DataScalerDask:
         start_time = time.time()
         logging.info(f"Scaling dataset to {self.target_rows:,} rows...")
 
+        # Ensure the output directory exists
+        if not os.path.exists(self.parquet_output_path):
+            os.makedirs(self.parquet_output_path, exist_ok=True)
+
         # Convert Dask DataFrame to Pandas DataFrame for multiprocessing
         data = data.compute()
-        current_rows = len(data)
 
         # Identify numeric columns
         numeric_columns = list(data.select_dtypes(include=["number"]).columns)
 
         # Prepare for multiprocessing
         rows_per_chunk = 10_000_000  # Adjust based on memory constraints
-        total_chunks = (self.target_rows + rows_per_chunk -
-                        1) // rows_per_chunk  # Ceiling division
+        total_chunks = (self.target_rows + rows_per_chunk - 1) // rows_per_chunk  # Ceiling division
 
         chunk_info_list = []
         rows_processed = 0
@@ -126,7 +130,7 @@ class DataScalerDask:
 
         # Process chunks in parallel using multiprocessing
         with Pool(cpu_count()) as pool:
-            chunk_paths = pool.map(self.process_chunk, chunk_info_list)
+            pool.map(self.process_chunk, chunk_info_list)
 
         self.log_time("Scaling with multiprocessing", start_time)
 
