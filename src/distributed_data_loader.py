@@ -4,7 +4,9 @@ import os
 import logging
 import time
 import gc
-from dask.distributed import Client
+from multiprocessing import Pool, cpu_count
+from typing import List, Optional
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -12,32 +14,31 @@ logging.basicConfig(level=logging.INFO,
 
 class DataScalerDask:
     """
-    Class for scaling datasets to larger sizes using Dask Distributed, with memory management and progress logs.
+    Class for scaling datasets to larger sizes using Dask and multiprocessing,
+    with time tracking and memory management.
     """
 
-    def __init__(self, input_path, csv_output_path, parquet_output_path, target_rows):
+    def __init__(self, input_path: str, parquet_output_path: str, target_rows: int) -> None:
         """
         Initialize the DataScalerDask.
 
         Parameters:
         - input_path (str): Path to the input dataset.
-        - csv_output_path (str): Path to save the scaled dataset in CSV format.
         - parquet_output_path (str): Path to save the scaled dataset in Parquet format.
         - target_rows (int): Target number of rows in the scaled dataset.
         """
         self.input_path = input_path
-        self.csv_output_path = csv_output_path
         self.parquet_output_path = parquet_output_path
         self.target_rows = target_rows
 
-    def log_time(self, operation_name, start_time, completed_rows=None):
+    def log_time(self, operation_name: str, start_time: float, completed_rows: Optional[int] = None) -> None:
         """
         Logs the time taken for a specific operation with optional progress information.
 
         Parameters:
         - operation_name (str): Name of the operation.
         - start_time (float): Start time of the operation.
-        - completed_rows (int): Number of rows processed so far (optional).
+        - completed_rows (Optional[int]): Number of rows processed so far (optional).
         """
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -47,19 +48,19 @@ class DataScalerDask:
             )
         else:
             logging.info(
-                f"{operation_name} completed in {elapsed_time:.2f} seconds.")
+                f"{operation_name} completed in {elapsed_time:.2f} seconds."
+            )
 
-    def load_data(self):
+    def load_data(self) -> dd.DataFrame:
         """
         Load the input dataset using Dask, and drop any unwanted index columns.
 
         Returns:
-        - dask.DataFrame: Loaded dataset.
+        - dd.DataFrame: Loaded dataset.
         """
         start_time = time.time()
         logging.info(f"Loading dataset from {self.input_path}...")
-        # Avoid type conflicts
-        data = dd.read_csv(self.input_path, assume_missing=True)
+        data: dd.DataFrame = dd.read_csv(self.input_path, assume_missing=True)
 
         # Drop 'Unnamed: 0' or any implicit index column
         if "Unnamed: 0" in data.columns:
@@ -69,77 +70,113 @@ class DataScalerDask:
         self.log_time("Dataset loading", start_time)
         return data
 
-    def scale_data(self, data):
+    @staticmethod
+    def add_noise(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
         """
-        Scale the dataset to the target size.
+        Add random noise to numeric columns in a Pandas DataFrame.
 
         Parameters:
-        - data (dask.DataFrame): Input dataset.
+        - df (pd.DataFrame): A Pandas DataFrame (processed partition).
+        - cols (List[str]): List of column names to add noise to.
 
         Returns:
-        - None: Saves the scaled dataset to the output paths.
+        - pd.DataFrame: DataFrame with noise added.
+        """
+        for col in cols:
+            df[col] += np.random.normal(0, 0.01, size=len(df))
+        return df
+
+    def scale_data(self, data: dd.DataFrame) -> None:
+        """
+        Scale the dataset using multiprocessing to parallelize chunk processing.
+
+        Parameters:
+        - data (dd.DataFrame): The input Dask DataFrame to scale.
         """
         start_time = time.time()
         logging.info(f"Scaling dataset to {self.target_rows:,} rows...")
 
-        # Compute the number of replications required
-        current_rows = data.shape[0].compute()
-        replication_factor = (self.target_rows // current_rows) + 1
-        logging.info(f"Replication factor: {replication_factor}")
+        # Convert Dask DataFrame to Pandas DataFrame for multiprocessing
+        data = data.compute()
+        current_rows = len(data)
 
-        # Replicate the dataset and partition for parallelism
-        replicated_data = dd.concat(
-            [data] * replication_factor, interleave_partitions=True)
-
-        # Ensure the dataset is sliced lazily to the target size
-        replicated_data = replicated_data.head(self.target_rows, compute=False)
-
-        # Add noise to numeric columns using map_partitions
-        def add_noise(df, cols):
-            """
-            Add random noise to numeric columns in a Dask DataFrame.
-
-            Parameters:
-            - df (pd.DataFrame): A Pandas DataFrame (processed partition).
-            - cols (list): List of column names to add noise to.
-
-            Returns:
-            - pd.DataFrame: DataFrame with noise added.
-            """
-            for col in cols:
-                df[col] += np.random.normal(0, 0.01, size=len(df))
-            return df
-
+        # Identify numeric columns
         numeric_columns = list(data.select_dtypes(include=["number"]).columns)
-        if numeric_columns:
-            logging.info(f"Adding noise to numeric columns: {numeric_columns}")
-            replicated_data = replicated_data.map_partitions(
-                add_noise, cols=numeric_columns)
 
-        self.log_time("Data scaling", start_time)
+        # Prepare for multiprocessing
+        rows_per_chunk = 10_000_000  # Adjust based on memory constraints
+        total_chunks = (self.target_rows + rows_per_chunk -
+                        1) // rows_per_chunk  # Ceiling division
 
-        # Save partitioned Parquet files directly
-        start_time = time.time()
-        logging.info(
-            f"Saving scaled dataset to {self.parquet_output_path} (Parquet format, partitioned)...")
-        replicated_data.to_parquet(
-            self.parquet_output_path,
-            engine="pyarrow",
-            write_index=False,
-            compression="snappy",
-            compute=True,
+        chunk_info_list = []
+        rows_processed = 0
+        for chunk_index in range(total_chunks):
+            remaining_rows = self.target_rows - rows_processed
+            current_chunk_size = min(rows_per_chunk, remaining_rows)
+
+            chunk_info_list.append({
+                "data": data,
+                "numeric_columns": numeric_columns,
+                "chunk_size": current_chunk_size,
+                "parquet_output_path": self.parquet_output_path,
+                "chunk_index": chunk_index,
+            })
+
+            rows_processed += current_chunk_size
+
+        # Process chunks in parallel using multiprocessing
+        with Pool(cpu_count()) as pool:
+            chunk_paths = pool.map(self.process_chunk, chunk_info_list)
+
+        self.log_time("Scaling with multiprocessing", start_time)
+
+    @staticmethod
+    def process_chunk(chunk_info):
+        """
+        Processes a single chunk: replicates data, adds noise, and saves it to a Parquet file.
+
+        Parameters:
+        - chunk_info (dict): Information for processing the chunk.
+
+        Returns:
+        - str: Path to the saved Parquet chunk.
+        """
+        data, numeric_columns, chunk_size, parquet_output_path, chunk_index = (
+            chunk_info["data"],
+            chunk_info["numeric_columns"],
+            chunk_info["chunk_size"],
+            chunk_info["parquet_output_path"],
+            chunk_info["chunk_index"],
         )
-        self.log_time("Parquet save", start_time)
 
-        # Save to CSV
-        start_time = time.time()
-        logging.info(
-            f"Saving scaled dataset to {self.csv_output_path} (CSV format, single file)...")
-        replicated_data.to_csv(self.csv_output_path,
-                               single_file=True, index=False, compute=True)
-        self.log_time("CSV save", start_time)
+        # Replicate data for the chunk
+        current_rows = len(data)
+        times_to_repeat_data = chunk_size // current_rows
+        remainder_rows = chunk_size % current_rows
 
-    def run(self):
+        replicated_data_list = []
+        if times_to_repeat_data > 0:
+            replicated_data_list.append(
+                pd.concat([data] * times_to_repeat_data, ignore_index=True))
+        if remainder_rows > 0:
+            replicated_data_list.append(data.iloc[:remainder_rows])
+
+        replicated_data = pd.concat(replicated_data_list, ignore_index=True)
+
+        # Add noise to numeric columns
+        if numeric_columns:
+            replicated_data = DataScalerDask.add_noise(
+                replicated_data, numeric_columns)
+
+        # Save the chunk to Parquet
+        chunk_parquet_path = os.path.join(
+            parquet_output_path, f"chunk_{chunk_index}.parquet")
+        replicated_data.to_parquet(
+            chunk_parquet_path, engine="pyarrow", index=False)
+
+        return chunk_parquet_path
+
+    def run(self) -> None:
         """
         Execute the scaling pipeline with time tracking.
         """
@@ -150,25 +187,14 @@ class DataScalerDask:
 
 
 if __name__ == "__main__":
-    # Initialize Dask Distributed with optimized settings for your machine
-    client = Client(n_workers=4, threads_per_worker=2, memory_limit="1.5GB")
-    logging.info("Dask Distributed Client initialized.")
-    logging.info(client)
-
-    # Define input and output paths
+    # Example usage
     INPUT_PATH = "data/New_Credit.csv"
-    CSV_OUTPUT_PATH = "data/scaled_data_1b.csv"
     PARQUET_OUTPUT_PATH = "data/scaled_data_1b/"
     TARGET_ROWS = 1_000_000_000  # 1 billion rows
 
-    # Initialize and run the scaling process
     scaler = DataScalerDask(
         input_path=INPUT_PATH,
-        csv_output_path=CSV_OUTPUT_PATH,
         parquet_output_path=PARQUET_OUTPUT_PATH,
         target_rows=TARGET_ROWS,
     )
     scaler.run()
-
-    # Shutdown the Dask client
-    client.shutdown()

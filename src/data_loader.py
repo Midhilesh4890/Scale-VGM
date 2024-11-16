@@ -4,6 +4,8 @@ import os
 import logging
 import time
 import gc
+from typing import List, Optional
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
@@ -14,29 +16,27 @@ class DataScalerDask:
     Class for scaling datasets to larger sizes using Dask, with time tracking and memory management.
     """
 
-    def __init__(self, input_path, csv_output_path, parquet_output_path, target_rows):
+    def __init__(self, input_path: str, parquet_output_path: str, target_rows: int) -> None:
         """
         Initialize the DataScalerDask.
 
         Parameters:
         - input_path (str): Path to the input dataset.
-        - csv_output_path (str): Path to save the scaled dataset in CSV format.
         - parquet_output_path (str): Path to save the scaled dataset in Parquet format.
         - target_rows (int): Target number of rows in the scaled dataset.
         """
         self.input_path = input_path
-        self.csv_output_path = csv_output_path
         self.parquet_output_path = parquet_output_path
         self.target_rows = target_rows
 
-    def log_time(self, operation_name, start_time, completed_rows=None):
+    def log_time(self, operation_name: str, start_time: float, completed_rows: Optional[int] = None) -> None:
         """
         Logs the time taken for a specific operation with optional progress information.
 
         Parameters:
         - operation_name (str): Name of the operation.
         - start_time (float): Start time of the operation.
-        - completed_rows (int): Number of rows processed so far (optional).
+        - completed_rows (Optional[int]): Number of rows processed so far (optional).
         """
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -46,19 +46,20 @@ class DataScalerDask:
             )
         else:
             logging.info(
-                f"{operation_name} completed in {elapsed_time:.2f} seconds.")
+                f"{operation_name} completed in {elapsed_time:.2f} seconds."
+            )
 
-    def load_data(self):
+    def load_data(self) -> dd.DataFrame:
         """
         Load the input dataset using Dask, and drop any unwanted index columns.
 
         Returns:
-        - dask.DataFrame: Loaded dataset.
+        - dd.DataFrame: Loaded dataset.
         """
         start_time = time.time()
         logging.info(f"Loading dataset from {self.input_path}...")
         # Avoid type conflicts
-        data = dd.read_csv(self.input_path, assume_missing=True)
+        data: dd.DataFrame = dd.read_csv(self.input_path, assume_missing=True)
 
         # Drop 'Unnamed: 0' or any implicit index column
         if "Unnamed: 0" in data.columns:
@@ -68,69 +69,88 @@ class DataScalerDask:
         self.log_time("Dataset loading", start_time)
         return data
 
-    def scale_data(self, data):
+    @staticmethod
+    def add_noise(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
         """
-        Scale the dataset to the target size.
+        Add random noise to numeric columns in a Pandas DataFrame.
 
         Parameters:
-        - data (dask.DataFrame): Input dataset.
+        - df (pd.DataFrame): A Pandas DataFrame (processed partition).
+        - cols (List[str]): List of column names to add noise to.
 
         Returns:
-        - None: Saves the scaled dataset to the output paths.
+        - pd.DataFrame: DataFrame with noise added.
         """
-        start_time = time.time()
+        for col in cols:
+            df[col] += np.random.normal(0, 0.01, size=len(df))
+        return df
+
+    def scale_data(self, data: dd.DataFrame) -> None:
+        start_time: float = time.time()
         logging.info(f"Scaling dataset to {self.target_rows:,} rows...")
 
-        # Compute the number of replications required
-        current_rows = data.shape[0].compute()
-        replication_factor = (self.target_rows // current_rows) + 1
-        logging.info(f"Replication factor: {replication_factor}")
+        current_rows: int = data.shape[0].compute()
+        total_rows_needed = self.target_rows
+        rows_per_chunk: int = 10_000_000  # Adjust if necessary
+        total_chunks: int = (total_rows_needed + rows_per_chunk -
+                             1) // rows_per_chunk  # Ceiling division
+        rows_processed: int = 0
 
-        # Process in batches to avoid memory overload
-        rows_per_chunk = 10_000_000  # Define chunk size for intermediate processing
-        total_chunks = self.target_rows // rows_per_chunk
-        rows_processed = 0
+        # Identify numeric columns once
+        numeric_columns: List[str] = list(
+            data.select_dtypes(include=["number"]).columns
+        )
 
         for chunk in range(total_chunks):
-            # Replicate data for the current chunk
-            replicated_data = dd.concat(
-                [data] * replication_factor, interleave_partitions=True)
-            replicated_data = replicated_data.head(
-                rows_per_chunk, compute=False)
+            remaining_rows = total_rows_needed - rows_processed
+            current_chunk_size = min(rows_per_chunk, remaining_rows)
+
+            times_to_repeat_data = current_chunk_size // current_rows
+            remainder_rows_in_chunk = current_chunk_size % current_rows
+
+            # Replicate data as needed for the current chunk
+            replicated_data_list = []
+            if times_to_repeat_data > 0:
+                replicated_data_list.append(
+                    dd.concat([data] * times_to_repeat_data,
+                              interleave_partitions=True)
+                )
+            if remainder_rows_in_chunk > 0:
+                remainder_data = data.head(
+                    remainder_rows_in_chunk, compute=False)
+                remainder_data = dd.from_pandas(remainder_data, npartitions=1)
+                replicated_data_list.append(remainder_data)
+
+            if replicated_data_list:
+                replicated_data = dd.concat(
+                    replicated_data_list, interleave_partitions=True
+                )
+            else:
+                # If no data to replicate, skip
+                logging.warning(f"No data to replicate in chunk {chunk}.")
+                continue
 
             # Add noise to numeric columns
-            def add_noise(df, cols):
-                """
-                Add random noise to numeric columns in a Dask DataFrame.
-
-                Parameters:
-                - df (pd.DataFrame): A Pandas DataFrame (processed partition).
-                - cols (list): List of column names to add noise to.
-
-                Returns:
-                - pd.DataFrame: DataFrame with noise added.
-                """
-                for col in cols:
-                    df[col] += np.random.normal(0, 0.01, size=len(df))
-                return df
-
-            numeric_columns = list(
-                data.select_dtypes(include=["number"]).columns)
             if numeric_columns:
                 replicated_data = replicated_data.map_partitions(
-                    add_noise, cols=numeric_columns)
+                    self.add_noise, cols=numeric_columns
+                )
 
-            # Persist the chunk and save incrementally to Parquet
-            replicated_data = replicated_data.persist()
-            chunk_parquet_path = os.path.join(
-                self.parquet_output_path, f"chunk_{chunk}.parquet")
+            # Save the chunk incrementally to Parquet
+            chunk_parquet_path: str = os.path.join(
+                self.parquet_output_path, f"chunk_{chunk}.parquet"
+            )
             replicated_data.to_parquet(
-                chunk_parquet_path, engine="pyarrow", write_index=False)
+                chunk_parquet_path, engine="pyarrow", write_index=False
+            )
 
             # Update progress
-            rows_processed += rows_per_chunk
-            self.log_time(f"Chunk {chunk + 1}/{total_chunks}",
-                          start_time, completed_rows=rows_processed)
+            rows_processed += current_chunk_size
+            self.log_time(
+                f"Chunk {chunk + 1}/{total_chunks}",
+                start_time,
+                completed_rows=rows_processed,
+            )
 
             # Clean up memory
             del replicated_data
@@ -138,42 +158,27 @@ class DataScalerDask:
 
         self.log_time("Total scaling", start_time)
 
-        # Save to CSV after processing all chunks
-        logging.info(
-            f"Saving entire dataset to {self.csv_output_path} (CSV format)...")
-        start_time = time.time()
-        combined_data = dd.read_parquet(self.parquet_output_path)
-        combined_data.to_csv(self.csv_output_path,
-                             single_file=True, index=False)
-        self.log_time("Final CSV save", start_time)
+        logging.info("Data scaling and saving to Parquet completed.")
 
-    def run(self):
+    def run(self) -> None:
         """
         Execute the scaling pipeline with time tracking.
         """
-        start_time = time.time()
-        data = self.load_data()
+        start_time: float = time.time()
+        data: dd.DataFrame = self.load_data()
         self.scale_data(data)
         self.log_time("Total pipeline", start_time)
 
 
 if __name__ == "__main__":
     # Example usage
-    INPUT_PATH = "data/New_Credit.csv"
-    CSV_OUTPUT_PATH = "data/scaled_data_1b.csv"
-    PARQUET_OUTPUT_PATH = "data/scaled_data_1b/"
-    TARGET_ROWS = 1_000_000_000  # 1 billion rows
+    INPUT_PATH: str = "data/New_Credit.csv"
+    PARQUET_OUTPUT_PATH: str = "data/scaled_data_1b/"
+    TARGET_ROWS: int = 1_000_000_000  # 1 billion rows
 
     scaler = DataScalerDask(
         input_path=INPUT_PATH,
-        csv_output_path=CSV_OUTPUT_PATH,
         parquet_output_path=PARQUET_OUTPUT_PATH,
         target_rows=TARGET_ROWS,
     )
     scaler.run()
-
-
-    import pandas as pd
-    df = pd.read_csv('data/scaled_data_10m.csv')
-    print(df.columns)
-    print(df.shape)

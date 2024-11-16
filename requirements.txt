@@ -6,3 +6,4 @@ dask
 dask[dataframe]
 dask[distributed]
 pyarrow
+bokeh>=3.1.0
