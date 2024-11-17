@@ -3,7 +3,6 @@ import numpy as np
 import os
 import logging
 import time
-import gc
 from multiprocessing import Pool, cpu_count
 from typing import List, Optional
 import pandas as pd
