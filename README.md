@@ -125,18 +125,21 @@ Scale-VGM/
 
 1. **Run Initial Scaling**:
    ```bash
-   python src/distributed_data_scaling.py -- which scales the dataset to 1 billion rows
+   python src/distributed_data_scaling.py
+   It scales the dataset to 1 billion rows
    ```
 
 2. **Run the Main Pipeline**:
    ```bash
-   python main.py -- will run the mode-specific normalization for the 1 billion row dataset efficiently
+   python main.py 
+   It will run the mode-specific normalization for the 1 billion row dataset efficiently
    ```
 
 **Stats Report (Optional)**:
 
    ```bash
-   python src/stats.py -- will generate stats report like missing values etc;
+   python src/stats.py
+   It will generate stats report like missing values etc;
    ```
 ---
 
