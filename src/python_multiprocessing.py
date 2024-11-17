@@ -4,6 +4,8 @@ import pandas as pd
 from sklearn.mixture import BayesianGaussianMixture
 from multiprocessing import Pool, cpu_count
 from glob import glob
+import time
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -17,26 +19,12 @@ class ScaleVGM:
     """
 
     def __init__(self, n_components=10, random_state=42, eps=0.005):
-        """
-        Initialize the ScaleVGM class.
-
-        Args:
-            n_components (int): Number of BGMM components (modes).
-            random_state (int): Random seed for reproducibility.
-            eps (float): Minimum weight threshold for valid modes.
-        """
         self.n_components = n_components
         self.random_state = random_state
         self.eps = eps
-        self.bgmm = None  # Placeholder for the Bayesian Gaussian Mixture Model
+        self.bgmm = None
 
     def fit(self, data):
-        """
-        Fit a Bayesian Gaussian Mixture Model (BGMM) to the data.
-
-        Args:
-            data (numpy.ndarray): 1D array of continuous data (e.g., `Amount` column).
-        """
         logging.info("Fitting Bayesian Gaussian Mixture Model (BGMM).")
         self.bgmm = BayesianGaussianMixture(
             n_components=self.n_components,
@@ -49,24 +37,12 @@ class ScaleVGM:
         logging.info("BGMM fitting completed.")
 
     def transform(self, data):
-        """
-        Apply Mode-Specific Normalization to the data.
-
-        Args:
-            data (numpy.ndarray): 1D array of continuous data.
-
-        Returns:
-            tuple: (normalized_data, mode_assignments)
-        """
         if self.bgmm is None:
             raise ValueError(
                 "BGMM model has not been fitted. Call 'fit' first.")
-
-        logging.info("Applying Mode-Specific Normalization.")
         means = self.bgmm.means_.flatten()
         stds = np.sqrt(self.bgmm.covariances_.flatten())
-        modes = self.bgmm.predict(data.reshape(-1, 1))  # Cluster assignments
-
+        modes = self.bgmm.predict(data.reshape(-1, 1))
         normalized_data = np.zeros_like(data)
         for mode in np.unique(modes):
             indices = modes == mode
@@ -74,35 +50,7 @@ class ScaleVGM:
                 data[indices] - means[mode]) / (4 * stds[mode])
             normalized_data[indices] = np.clip(
                 normalized_data[indices], -0.99, 0.99)
-
         return normalized_data, modes
-
-    def inverse_transform(self, normalized_data, modes):
-        """
-        Revert normalized data back to its original scale.
-
-        Args:
-            normalized_data (numpy.ndarray): Normalized data.
-            modes (numpy.ndarray): Mode assignments for each data point.
-
-        Returns:
-            numpy.ndarray: Reconstructed original data.
-        """
-        if self.bgmm is None:
-            raise ValueError(
-                "BGMM model has not been fitted. Call 'fit' first.")
-
-        logging.info("Reverting normalized data to original scale.")
-        means = self.bgmm.means_.flatten()
-        stds = np.sqrt(self.bgmm.covariances_.flatten())
-
-        original_data = np.zeros_like(normalized_data)
-        for mode in np.unique(modes):
-            indices = modes == mode
-            original_data[indices] = normalized_data[indices] * \
-                (4 * stds[mode]) + means[mode]
-
-        return original_data
 
 
 def process_partition(file_path, transformer, output_path):
@@ -117,7 +65,8 @@ def process_partition(file_path, transformer, output_path):
     Returns:
         str: Path to the saved transformed file.
     """
-    logging.info(f"Processing file: {file_path}")
+    start_time = time.time()
+    logging.info(f"Started processing file: {file_path}")
 
     # Load partition
     partition = pd.read_parquet(file_path)
@@ -125,13 +74,15 @@ def process_partition(file_path, transformer, output_path):
     # Transform the partition
     normalized_data, modes = transformer.transform(partition["Amount"].values)
     partition["Amount_Transformed"] = normalized_data
-    # Optional: Add mode assignments for debugging
     partition["Mode_Assignment"] = modes
 
     # Save the transformed partition
-    output_file = f"{output_path}/transformed_{file_path.split('/')[-1]}"
+    output_file = os.path.join(
+        output_path, f"transformed_{os.path.basename(file_path)}")
     partition.to_parquet(output_file, index=False, engine="pyarrow")
-    logging.info(f"Saved transformed file to: {output_file}")
+    elapsed_time = time.time() - start_time
+    logging.info(
+        f"Finished processing file: {file_path} in {elapsed_time:.2f} seconds.")
     return output_file
 
 
@@ -140,13 +91,12 @@ if __name__ == "__main__":
     INPUT_PATH = "data/scaled_data_1b/"  # Directory with input Parquet files
     # Directory for transformed Parquet files
     OUTPUT_PATH = "data/transformed_data_1b/"
+    os.makedirs(OUTPUT_PATH, exist_ok=True)
 
     # Step 1: Fit the ScaleVGM transformer using a sample
     logging.info("Loading a sample of the data for BGMM fitting.")
-    # Use the first file as a sample
     sample_file = glob(f"{INPUT_PATH}/*.parquet")[0]
-    sample_data = pd.read_parquet(
-        sample_file)["Amount"].values[:100000]  # Load first 100,000 rows
+    sample_data = pd.read_parquet(sample_file)["Amount"].values[:100000]
     scale_vgm = ScaleVGM(n_components=10)
     scale_vgm.fit(sample_data)
 
@@ -157,6 +107,8 @@ if __name__ == "__main__":
 
     # Step 3: Process all files in parallel using multiprocessing
     logging.info(f"Starting multiprocessing with {cpu_count()} workers.")
+    total_start_time = time.time()
+
     with Pool(processes=cpu_count()) as pool:
         results = [
             pool.apply_async(process_partition, (file, scale_vgm, OUTPUT_PATH))
@@ -164,4 +116,6 @@ if __name__ == "__main__":
         ]
         outputs = [res.get() for res in results]
 
-    logging.info("All files processed successfully.")
+    total_elapsed_time = time.time() - total_start_time
+    logging.info(
+        f"All files processed successfully in {total_elapsed_time:.2f} seconds.")

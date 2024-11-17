@@ -1,9 +1,11 @@
+import glob
 import logging
 import numpy as np
 import pandas as pd
 from sklearn.mixture import BayesianGaussianMixture
 from dask.distributed import Client
 import dask.dataframe as dd
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -127,7 +129,9 @@ class DataProcessor:
         """
         Process the dataset in chunks, transform it using VGM, and save the output.
         """
+        start_time = time.time()
         logging.info("Loading dataset using Dask.")
+
         # Load Parquet files as Dask DataFrame
         ddf = dd.read_parquet(self.input_path)
 
@@ -138,8 +142,13 @@ class DataProcessor:
         # Save the transformed dataset back to Parquet
         logging.info(f"Saving transformed dataset to {self.output_path}.")
         transformed_ddf.to_parquet(
-            self.output_path, engine="pyarrow", write_index=False)
+            self.output_path, engine="pyarrow", write_index=False
+        )
         logging.info("Transformation completed and data saved.")
+
+        end_time = time.time()
+        total_time = end_time - start_time
+        logging.info(f"Total processing time: {total_time:.2f} seconds.")
 
     def _transform_partition(self, partition):
         """
@@ -151,16 +160,23 @@ class DataProcessor:
         Returns:
             pandas.DataFrame: Transformed partition with normalized data.
         """
-        logging.info("Transforming a data partition.")
+        start_time = time.time()
+        logging.info("Started transforming a data partition.")
 
         # Apply the ScaleVGM transform to the "Amount" column
         normalized_data, modes = self.transformer.transform(
-            partition["Amount"].values)
+            partition["Amount"].values
+        )
 
         # Add the normalized column to the partition
         partition["Amount_Transformed"] = normalized_data
         # Optional: Add mode assignments for debugging
         partition["Mode_Assignment"] = modes
+
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        logging.info(
+            f"Finished transforming partition in {elapsed_time:.2f} seconds.")
 
         return partition
 
@@ -176,7 +192,15 @@ if __name__ == "__main__":
 
     # Step 1: Load a sample for BGMM fitting
     logging.info("Loading a sample of the data for BGMM fitting.")
-    sample_data = pd.read_parquet(INPUT_PATH).head(100000)["Amount"].values
+
+    # Gather all matching Parquet files
+    parquet_files = glob.glob(INPUT_PATH)
+    if not parquet_files:
+        raise FileNotFoundError(f"No Parquet files found at {INPUT_PATH}")
+
+    # Read and sample from the first few files
+    sample_frames = [pd.read_parquet(file) for file in parquet_files[:5]]
+    sample_data = pd.concat(sample_frames).head(100000)["Amount"].values
 
     # Step 2: Fit the ScaleVGM transformer
     logging.info("Fitting the ScaleVGM transformer.")
