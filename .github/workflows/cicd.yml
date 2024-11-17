@@ -1,4 +1,4 @@
-name: CI/CD Pipeline for Scale-VGM
+name: CI/CD Pipeline for Scale-VGM with Kubernetes CronJob
 
 on:
   push:
@@ -7,46 +7,35 @@ on:
   pull_request:
     branches:
       - main
+  schedule:
+    - cron: '*/1 * * * *' # Trigger every minute for periodic execution
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout code from the repository
-      - name: Checkout code
+      # Step 1: Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v3
 
-      # Step 2: Set up Python environment
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      # Step 3: Install dependencies
-      - name: Install dependencies
-        run: |
-          echo "Simulating dependency installation..."
-          sleep 2 # Simulate the time it takes to install dependencies
-          echo "Dependencies installed successfully."
-
-      # Step 4: Run distributed_data_scaling.py (Mocked)
-      - name: Run distributed_data_scaling.py
-        run: |
-          echo "Simulating distributed_data_scaling.py..."
-          sleep 3 # Simulate processing time
-          echo "distributed_data_scaling.py ran successfully."
-
-      # Step 5: Run main.py (Mocked)
-      - name: Run main.py
-        run: |
-          echo "Simulating main.py execution..."
-          sleep 3 # Simulate processing time
-          echo "main.py executed successfully."
-
-      # Step 6: Build Docker Image
+      # Step 2: Build Docker Image
       - name: Build Docker Image
         run: |
-          echo "Simulating Docker image build..."
-          sleep 2 # Simulate time taken to build Docker
-          echo "Docker image built successfully with tag scale-vgm:latest."
+          echo "Building Docker image..."
+          docker build -t scale-vgm:latest .
+          echo "Docker image built successfully."
+
+      # Step 3: Mock Push to Kubernetes
+      - name: Mock Kubernetes Deployment
+        run: |
+          echo "Simulating Kubernetes deployment..."
+          sleep 2
+          echo "Simulated deployment completed successfully."
+
+      # Step 4: Deploy Kubernetes CronJob (Mocked)
+      - name: Deploy Kubernetes CronJob
+        run: |
+          echo "Simulating kubectl apply -f k8s/cronjob.yaml"
+          sleep 2
+          echo "Simulated Kubernetes CronJob deployment completed successfully."

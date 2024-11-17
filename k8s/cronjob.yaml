@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-vgm-cronjob
+  labels:
+    app: scale-vgm
+spec:
+  schedule: "*/1 * * * *" # Run every minute
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: scale-vgm
+        spec:
+          containers:
+            - name: scale-vgm
+              image: your-registry/scale-vgm:latest # Replace with the actual Docker registry image
+              command: ["python", "main.py"] # Replace with your pipeline command
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "500m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "1"
+          restartPolicy: OnFailure
