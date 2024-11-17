@@ -90,7 +90,7 @@ if __name__ == "__main__":
     # Paths
     INPUT_PATH = "data/scaled_data_1b/"  # Directory with input Parquet files
     # Directory for transformed Parquet files
-    OUTPUT_PATH = "data/transformed_data_1b/"
+    OUTPUT_PATH = "data/python_transformed_data_1b/"
     os.makedirs(OUTPUT_PATH, exist_ok=True)
 
     # Step 1: Fit the ScaleVGM transformer using a sample
