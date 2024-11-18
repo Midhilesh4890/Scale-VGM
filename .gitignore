@@ -3,3 +3,4 @@
 *.venv
 *.parquet
 dask_temp
+*.tmp
