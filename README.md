@@ -82,13 +82,27 @@ Scale-VGM/
 - Prepares the data for processing:
   - Loads data using Dask.
   - Ensures compatibility for downstream scaling.
+  - **Time taken** - 150 to 200 sec using Dask and python's multiprocessing faster than Dask's multiprocessing
 
 ### `main.py`
 - Orchestrates the entire pipeline:
   - **Step 1**: Fits the BGMM model on a sample of the data.
   - **Step 2**: Processes the dataset in parallel using `DataProcessor`.
-
----
+  - **Time taken**: 12 min to run
+  - Check the UI at localhost:8787/status which explains the number of chunks processing, in queue and in memory
+  - Shared the screenshot here dask_processing.jpg in the repo
+  - **NOTE**: I am using below config based on my system RAM(8GB) and for better infrastructure we can easily scale and run this much faster
+  - # Configure Dask for low-memory systems
+   ```
+     client = Client(
+        processes=True,
+        n_workers=2,  # Limited to 2 workers for parallelism
+        threads_per_worker=1,
+        memory_limit="3GB",  # Restrict memory usage per worker
+        local_directory="dask_temp",  # Disk spilling location for Dask
+    )
+   ```
+   ---
 
 ## Setup and Installation
 
